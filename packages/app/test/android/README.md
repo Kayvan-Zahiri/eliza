@@ -59,6 +59,11 @@ bun run --cwd packages/app test:e2e:android:lifecycle:reboot
 bun run --cwd packages/app test:e2e:android:routes
 ```
 
+Focused slices used by the retained device-CI shell scripts run through
+`scripts/android-playwright-e2e.mjs`. Like the full orchestrator, they print a
+final `bundle:` line and accept `--output <dir>` after the package command; the
+bundle is finalized before a failing slice exits non-zero.
+
 ## Prerequisites (env)
 
 - Android SDK with `adb`, `emulator`, and a system image. The harness resolves
@@ -117,10 +122,10 @@ bun run --cwd packages/app test:e2e:android:routes
 | `ELIZA_ANDROID_REQUIRE_AGENT=0` | Don't gate route coverage on local agent health (cloud/remote mode) |
 | `ELIZA_EMULATOR_MEMORY_MB` / `ELIZA_EMULATOR_CORES` | Override emulator sizing |
 
-## CI onboarding lane
+## Device CI wiring status
 
-`android-device-e2e.yml` now runs a load-bearing first-run lane before the
-best-effort route sweep:
+The former `android-device-e2e.yml` workflow ran this load-bearing first-run
+lane before the best-effort route sweep:
 
 1. Start `packages/app-core/scripts/serve-real-local-agent.ts` on host
    `127.0.0.1:31337` with pairing disabled and deterministic model handlers.
@@ -135,6 +140,13 @@ best-effort route sweep:
 Artifacts are written under
 `packages/app/test-results/android-onboarding-to-home/`:
 `home-landing.png`, `onboarding-to-home.mp4`, and `host-agent.log`.
+
+CI consolidation commit `926dc8b58a1` removed that workflow and the iOS
+simulator producer from `mobile-build-smoke.yml`. Their Android shell scripts
+remain under `.github/scripts/android-device-e2e/`, but no current workflow
+invokes them or listens to `ci:device`. Issue #19640 tracks wiring these bundle
+producers into the consolidated CI authority; runner behavior can be tested in
+the meantime, but exact-head device artifacts require that follow-up.
 
 ## On-device agent: where it runs
 
