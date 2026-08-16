@@ -98,6 +98,13 @@ export interface Bindings {
   /** One strongly ordered X credential refresh coordinator per organization and role. */
   TWITTER_OAUTH_REFRESH_COORDINATORS?: RuntimeDurableObjectNamespace;
 
+  /** One explicitly invalidated Shared account projection per connector sender. */
+  PERSONAL_DELIVERY_PROJECTIONS?: RuntimeDurableObjectNamespace;
+  /** Two-phase rollout gate; readers activate only after invalidation writers are the rollback baseline. */
+  PERSONAL_DELIVERY_PROJECTION_READ_ENABLED?: string;
+  /** Exact-once Telegram egress ledger for Personal Shared edge delivery. */
+  PERSONAL_TELEGRAM_DELIVERIES?: RuntimeDurableObjectNamespace;
+
   // ---- Cloudflare machine-local protective rate limits ----
   GLOBAL_RATE_LIMITER?: RuntimeRateLimitBinding;
   CHAT_ROUTE_RATE_LIMITER?: RuntimeRateLimitBinding;
@@ -401,6 +408,10 @@ export interface Bindings {
   WEBHOOK_GATEWAY_URL?: string;
   GATEWAY_WEBHOOK_URL?: string;
   ELIZA_APP_WEBHOOK_PROJECT?: string;
+  /** Moves only the official Personal Shared Telegram transport to the Worker edge. */
+  PERSONAL_SHARED_TELEGRAM_EDGE_ENABLED?: string;
+  ELIZA_APP_TELEGRAM_BOT_TOKEN?: string;
+  ELIZA_APP_TELEGRAM_WEBHOOK_SECRET?: string;
   // Dedicated shared secret stamped onto forwarded webhook calls so the internal
   // gateway can reject traffic that didn't transit the BFF forwarder (finding
   // L3). Deliberately separate from GATEWAY_INTERNAL_SECRET (internal-event

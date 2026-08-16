@@ -155,7 +155,7 @@ export default function PaymentRequestPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<PageError | null>(null);
   const [isPaying, setIsPaying] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState<number | null>(null);
   // Monotonic key: only the latest load (or a checkout revalidation started
   // under it) may commit state, so stale responses cannot cross routes.
   const loadGenerationRef = useRef(0);
@@ -341,7 +341,9 @@ export default function PaymentRequestPage() {
 
   const isPaid = paymentRequest.status === "settled";
   const deadline = parseDeadline(paymentRequest.expiresAt);
-  const deadlinePassed = isDeadlinePassed(deadline, nowMs);
+  // Loading the request and capturing its comparison timestamp happen at the
+  // same effect boundary. Fail closed if they ever become temporarily split.
+  const deadlinePassed = nowMs === null || isDeadlinePassed(deadline, nowMs);
   const hasInvalidPayableDeadline =
     isPayableStatus(paymentRequest.status) && deadline.kind === "invalid";
   const isExpired =
@@ -422,11 +424,11 @@ export default function PaymentRequestPage() {
 
           <div className="mt-8">
             <Button
-              variant="ghost"
+              variant="surfaceAccent"
               type="button"
               disabled={!canPay || isPaying}
               onClick={beginCheckout}
-              className="flex w-full items-center justify-center gap-3 bg-accent-subtle px-4 py-4 text-txt transition hover:bg-bg-hover disabled:pointer-events-none disabled:opacity-30"
+              className="flex w-full items-center justify-center gap-3 px-4 py-4 transition disabled:pointer-events-none disabled:opacity-30"
             >
               {isPaying ? (
                 <Loader2 className="h-5 w-5 animate-spin" />

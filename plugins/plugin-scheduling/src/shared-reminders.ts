@@ -7,6 +7,7 @@
 import type {
   Action,
   ActionResult,
+  EffectReceipt,
   HandlerCallback,
   Memory,
   Plugin,
@@ -16,10 +17,12 @@ import type {
   ScheduledTaskRunner,
   ScheduledTaskTrigger,
 } from "./scheduled-task/types.js";
+import { resolveExplicitSharedReminderDelay } from "./shared-reminder-relative-delay.js";
 
 /** Dedicated runtimes route imported Shared reminders through Cloud's trusted gateway. */
 export const SHARED_CUTOVER_GATEWAY_CHANNEL = "shared_gateway_dm";
 export const SHARED_REMINDER_MAX_TEXT_LENGTH = 2000;
+const MAX_DATE_TIMESTAMP_MS = 8_640_000_000_000_000;
 
 export const SHARED_REMINDERS_EDGE_COMPATIBILITY = {
   target: "edge",
@@ -144,12 +147,24 @@ async function actionFailure(
 function reminderTrigger(
   input: Record<string, unknown>,
   now: Date,
+  explicitDelayMilliseconds?: number,
 ): ScheduledTaskTrigger | undefined {
+  if (explicitDelayMilliseconds !== undefined) {
+    const at = now.getTime() + explicitDelayMilliseconds;
+    if (Number.isFinite(at) && Math.abs(at) <= MAX_DATE_TIMESTAMP_MS) {
+      return { kind: "once", atIso: new Date(at).toISOString() };
+    }
+    return undefined;
+  }
   const inMinutes = positiveNumber(input, "inMinutes", "minutesFromNow");
   if (inMinutes !== undefined) {
+    const at = now.getTime() + inMinutes * 60_000;
+    if (!Number.isFinite(at) || Math.abs(at) > MAX_DATE_TIMESTAMP_MS) {
+      return undefined;
+    }
     return {
       kind: "once",
-      atIso: new Date(now.getTime() + inMinutes * 60_000).toISOString(),
+      atIso: new Date(at).toISOString(),
     };
   }
   const atIso = textParameter(input, "atIso", "at");
@@ -176,6 +191,54 @@ function taskSummary(task: ScheduledTask): string {
           ? `${task.trigger.expression} (${task.trigger.tz})`
           : task.trigger.kind;
   return `${task.taskId}: ${task.output?.fallback?.body ?? task.promptInstructions} — ${when} [${task.state.status}]`;
+}
+
+function creationReceipt(args: {
+  task: ScheduledTask;
+  commit: { logId: string; occurredAtIso: string };
+  replayed: boolean;
+}): EffectReceipt {
+  const base = {
+    receiptId: `shared-reminder:create:${args.commit.logId}`,
+    operation: "shared.reminder.create",
+    resource: {
+      kind: "shared.reminder",
+      id: args.task.taskId,
+      version: args.commit.logId,
+    },
+    artifacts: [
+      {
+        kind: "shared.reminder.log",
+        id: args.commit.logId,
+        version: "scheduled",
+      },
+    ],
+    idempotency: {
+      key: args.task.idempotencyKey ?? null,
+      replayed: args.replayed,
+    },
+    observedAt: args.commit.occurredAtIso,
+  } as const;
+  return args.replayed
+    ? {
+        ...base,
+        outcome: "noop",
+        idempotency: {
+          key: args.task.idempotencyKey ?? null,
+          replayed: true,
+        },
+        reason:
+          "The persisted reminder already satisfies this idempotent request.",
+      }
+    : {
+        ...base,
+        outcome: "applied",
+        commit: {
+          kind: "durable",
+          id: args.commit.logId,
+          committedAt: args.commit.occurredAtIso,
+        },
+      };
 }
 
 export function createSharedRemindersEdgeAction(
@@ -295,14 +358,26 @@ export function createSharedRemindersEdgeAction(
             callback,
           );
         }
-        const trigger = reminderTrigger(input, now());
+        const explicitDelay = resolveExplicitSharedReminderDelay(
+          message.content?.text,
+        );
+        if (explicitDelay.kind === "invalid") {
+          return await actionFailure(explicitDelay.reason, callback);
+        }
+        const trigger = reminderTrigger(
+          input,
+          now(),
+          explicitDelay.kind === "resolved"
+            ? explicitDelay.milliseconds
+            : undefined,
+        );
         if (!trigger) {
           return await actionFailure(
             "A reminder time is required: inMinutes, atIso, everyMinutes, or cronExpression with timezone.",
             callback,
           );
         }
-        const task = await options.runner.schedule({
+        const scheduled = await options.runner.scheduleWithResult({
           kind: "reminder",
           promptInstructions: body,
           trigger,
@@ -324,12 +399,24 @@ export function createSharedRemindersEdgeAction(
           metadata: { delivery },
           executionProfile: "notify-only",
         });
-        const text = `Reminder set for ${taskSummary(task)}`;
+        const text = scheduled.replayed
+          ? `Reminder already set for ${taskSummary(scheduled.task)}`
+          : `Reminder set for ${taskSummary(scheduled.task)}`;
+        const receipt = creationReceipt(scheduled);
         await callback?.({ text });
         return {
           success: true,
           text,
-          data: { actionName: "REMINDERS", operation, task },
+          data: {
+            actionName: "REMINDERS",
+            operation,
+            task: scheduled.task,
+            replayed: scheduled.replayed,
+          },
+          verifiedUserFacing: true,
+          userFacingText: text,
+          effectReceipts: [receipt],
+          userFacingEffectReceiptIds: [receipt.receiptId],
         };
       }
 

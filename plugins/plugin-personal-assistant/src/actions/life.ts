@@ -1054,6 +1054,48 @@ function resolveDuplicateByTimeHint(
   return hits.length === 1 ? (hits.at(0) ?? null) : null;
 }
 
+/** Records whose DISTINCT titles the owner named verbatim in one enumerated
+ * delete ask ("delete these todos: A, B and C. keep D."). Destructive, so
+ * every guard fails toward the single-target clarify path: at least two
+ * DISTINCT titles must be verbatim-contained in the owner's own words; a
+ * contained title matching more than one stored record aborts entirely
+ * (duplicate titles keep the disambiguation ask); and a title preceded by a
+ * keep-style cue ("keep X", "except X", "leave X", "but not X", "don't
+ * delete X") is excluded from deletion rather than deleted by containment. */
+const ENUMERATED_DELETE_KEEP_CUE_RE =
+  /(?:\bkeep|\bexcept(?:\s+for)?|\bleave|\bbut\s+not|\bdon'?t\s+(?:delete|remove)|\bnot|\bspare)\s*(?:the\s+)?$/i;
+
+async function resolveEnumeratedDeleteTargets(
+  service: LifeOpsService,
+  ownerText: string,
+  domain?: LifeOpsDomain,
+): Promise<LifeOpsDefinitionRecord[]> {
+  const normalizedOwner = normalizeTitle(ownerText);
+  if (!normalizedOwner) return [];
+  const defs = (await service.listDefinitions()).filter((entry) =>
+    domain ? entry.definition.domain === domain : true,
+  );
+  const byTitle = new Map<string, LifeOpsDefinitionRecord[]>();
+  for (const entry of defs) {
+    const key = normalizeTitle(entry.definition.title);
+    if (!key) continue;
+    byTitle.set(key, [...(byTitle.get(key) ?? []), entry]);
+  }
+  const targets: LifeOpsDefinitionRecord[] = [];
+  for (const [key, records] of byTitle) {
+    // A very short title ("go", "gym") is contained in too much ordinary
+    // prose to serve as a deletion warrant on its own.
+    if (key.length < 4) continue;
+    const index = normalizedOwner.indexOf(key);
+    if (index < 0) continue;
+    if (records.length !== 1) return [];
+    const prefix = normalizedOwner.slice(Math.max(0, index - 32), index);
+    if (ENUMERATED_DELETE_KEEP_CUE_RE.test(prefix)) continue;
+    targets.push(records[0]);
+  }
+  return targets.length > 1 ? targets : [];
+}
+
 async function resolveDefinitionForMutation(
   service: LifeOpsService,
   target: string | undefined,
@@ -1067,7 +1109,16 @@ async function resolveDefinitionForMutation(
   const normalizedOwnerText = normalizeTitle(ownerText);
   const explicitlyNamed = defs.filter((entry) => {
     const title = normalizeTitle(entry.definition.title);
-    return title.length > 0 && normalizedOwnerText.includes(title);
+    if (title.length === 0) return false;
+    const index = normalizedOwnerText.indexOf(title);
+    if (index < 0) return false;
+    // A title named inside a keep-style clause ("keep buy sandpaper",
+    // "don't delete X") is an exclusion, not a target — without this, the
+    // keep clause itself made the kept item an "explicitly named" candidate
+    // and forced a bogus disambiguation ask (or worse, on non-destructive
+    // ops, a wrong-target resolution).
+    const prefix = normalizedOwnerText.slice(Math.max(0, index - 32), index);
+    return !ENUMERATED_DELETE_KEEP_CUE_RE.test(prefix);
   });
   if (explicitlyNamed.length === 1) {
     return {
@@ -1576,6 +1627,13 @@ async function renderLifeActionReply(args: {
       "Never surface raw ISO timestamps unless the user used raw ISO timestamps.",
       "If this is a preview, make clear it is not saved yet and the user can confirm or change it naturally.",
       "If this is reply-only, do not pretend you saved or changed anything.",
+      // Live receipts behind the two rules below: a review turn reported
+      // "1/12 books done" for a goal that was never saved (the number came
+      // from chat history, not records), and a compound ask got a false
+      // "don't know your favorite color" from this renderer even though the
+      // assistant's own context knew it (the fact lives outside lifeops).
+      "Ground every factual claim — counts, progress numbers, item names, schedules, states — in the structured context provided for THIS reply. Never carry numbers or outcomes in from the conversation that the records here do not show; if the records show nothing, say the records show nothing.",
+      "Answer only about the user's tracked items (todos, reminders, goals, routines, habits, alarms). If the user's message also asked about something outside these records — a personal fact, general knowledge, another tool — leave that part unaddressed rather than answering or denying it; the assistant covers it separately.",
     ],
   });
   return rendered.trim().length > 0 ? rendered : naturalFallback;
@@ -5568,6 +5626,57 @@ async function runLifeOperationHandlerInner(
             actionName: ownerSurfaceActionName,
             noop: true,
             blockedReason: "broad_destructive_delete",
+          },
+        };
+      }
+      // Enumerated multi-target delete first: several DISTINCT verbatim-named
+      // items in one ask delete together (guards documented on the resolver;
+      // anything ambiguous falls through to the single-target path below).
+      const enumeratedTargets = await resolveEnumeratedDeleteTargets(
+        service,
+        messageText(message) || intent,
+        domain,
+      );
+      if (enumeratedTargets.length > 1) {
+        for (const entry of enumeratedTargets) {
+          await service.deleteDefinition(entry.definition.id);
+        }
+        const titles = enumeratedTargets.map(
+          (entry) => `"${entry.definition.title}"`,
+        );
+        const lastDeleted =
+          enumeratedTargets[enumeratedTargets.length - 1].definition;
+        const fallback = `Deleted ${enumeratedTargets.length} items: ${titles.join(", ")}.`;
+        return {
+          success: true,
+          text: await renderLifeActionReply({
+            runtime,
+            message,
+            state,
+            intent,
+            scenario: "deleted_definition",
+            fallback,
+            context: {
+              deleted: {
+                title: titles.join(", "),
+              },
+            },
+          }),
+          data: {
+            actionName: ownerSurfaceActionName,
+            // The receipt deriver reads `deleted` (single record, audit-backed
+            // commit proof); the full enumeration rides `deletedMany` so the
+            // canonical text stays bound to a real committed receipt.
+            deleted: {
+              kind: "definition",
+              id: lastDeleted.id,
+              title: lastDeleted.title,
+            },
+            deletedMany: enumeratedTargets.map((entry) => ({
+              kind: "definition",
+              id: entry.definition.id,
+              title: entry.definition.title,
+            })),
           },
         };
       }
